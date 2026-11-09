@@ -170,6 +170,21 @@ static Variant set_parts(PackedArray<float> vertices, PackedArray<int32_t> trian
 	return text(cn::set_parts(vertices.fetch(), triangles.fetch(), counts.fetch()));
 }
 
+// --- cdt2d (constrained Delaunay triangulation with hole removal) -------------
+
+static Variant cdt2d_triangulate(PackedArray<float> boundary_xy, PackedArray<float> holes_xy,
+		PackedArray<int32_t> hole_counts, PackedArray<float> interior_xy) {
+	return text(cn::cdt2d_triangulate(boundary_xy.fetch(), holes_xy.fetch(), hole_counts.fetch(), interior_xy.fetch()));
+}
+
+static Variant cdt2d_points() {
+	return packed(cn::cdt2d_points());
+}
+
+static Variant cdt2d_faces() {
+	return packed(cn::cdt2d_faces());
+}
+
 // --- checks -------------------------------------------------------------------
 
 static Variant check(String name) {

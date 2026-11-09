@@ -21,6 +21,10 @@
 #include <pmp/algorithms/remeshing.h>
 #include <pmp/surface_mesh.h>
 
+#include <geogram/basic/common.h>
+#include <geogram/basic/logger.h>
+#include <geogram/delaunay/CDT_2d.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -29,6 +33,8 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <utility>
 
 namespace cn {
 namespace {
@@ -57,6 +63,18 @@ BuiltMesh g_mesh;
 std::vector<std::vector<float>> g_boundary_pv;
 std::vector<std::vector<int32_t>> g_boundary_pf;
 Counts g_counts;
+
+// cdt2d_triangulate's last result (x,y pairs; triangle indices into them).
+std::vector<float> g_cdt2d_points;
+std::vector<int32_t> g_cdt2d_faces;
+
+void ensure_geogram_initialized() {
+	static std::once_flag init_flag;
+	std::call_once(init_flag, []() {
+		GEO::initialize(GEO::GEOGRAM_INSTALL_NONE);
+		GEO::Logger::instance()->set_quiet(true);
+	});
+}
 
 std::string fmt(const char *f, ...) __attribute__((format(printf, 1, 2)));
 std::string fmt(const char *f, ...) {
@@ -1000,6 +1018,132 @@ std::string set_parts(const std::vector<float> &vertices, const std::vector<int3
 		af += nf;
 	}
 	return fmt("ok parts=%d", int(g_boundary_pv.size()));
+}
+
+std::string cdt2d_triangulate(const std::vector<float> &boundary_xy, const std::vector<float> &holes_xy,
+		const std::vector<int32_t> &hole_counts, const std::vector<float> &interior_xy) {
+	return guarded([&] {
+		if (boundary_xy.size() < 6 || boundary_xy.size() % 2 != 0) {
+			return fail("boundary_xy needs >=3 x,y points");
+		}
+		const size_t nb = boundary_xy.size() / 2;
+
+		// Flatten boundary, then each hole in order, then interior points,
+		// exactly as tri2d_cli.cpp's all_points does (CDT2d wants one array).
+		std::vector<double> all_x, all_y;
+		auto push_xy = [&](const std::vector<float> &src, size_t start_pt, size_t count) {
+			for (size_t k = 0; k < count; ++k) {
+				all_x.push_back(double(src[2 * (start_pt + k)]));
+				all_y.push_back(double(src[2 * (start_pt + k) + 1]));
+			}
+		};
+		push_xy(boundary_xy, 0, nb);
+
+		std::vector<std::pair<size_t, size_t>> hole_ranges; // [start,end) into all_x/all_y
+		size_t hole_at = 0; // element offset into holes_xy
+		for (int32_t n : hole_counts) {
+			if (n < 3 || hole_at + size_t(n) * 2 > holes_xy.size()) {
+				return fail("hole_counts overrun holes_xy");
+			}
+			const size_t start = all_x.size();
+			push_xy(holes_xy, hole_at / 2, size_t(n));
+			hole_at += size_t(n) * 2;
+			hole_ranges.push_back({ start, all_x.size() });
+		}
+		if (interior_xy.size() % 2 != 0) {
+			return fail("interior_xy must be x,y pairs");
+		}
+		push_xy(interior_xy, 0, interior_xy.size() / 2);
+
+		const size_t npts = all_x.size();
+		if (npts < 3) {
+			return fail("not enough points");
+		}
+
+		// Bounding box with margin for the enclosing rectangle CDT2d requires.
+		double minx = all_x[0], maxx = all_x[0], miny = all_y[0], maxy = all_y[0];
+		for (size_t k = 1; k < npts; ++k) {
+			minx = std::min(minx, all_x[k]);
+			maxx = std::max(maxx, all_x[k]);
+			miny = std::min(miny, all_y[k]);
+			maxy = std::max(maxy, all_y[k]);
+		}
+		const double dx = std::max(maxx - minx, 1e-9), dy = std::max(maxy - miny, 1e-9);
+		const double margin = std::max(dx, dy) * 0.2 + 1e-6;
+
+		ensure_geogram_initialized();
+
+		GEO::CDT2d cdt;
+		cdt.create_enclosing_rectangle(minx - margin, miny - margin, maxx + margin, maxy + margin);
+
+		std::vector<double> flat(npts * 2);
+		for (size_t k = 0; k < npts; ++k) {
+			flat[2 * k + 0] = all_x[k];
+			flat[2 * k + 1] = all_y[k];
+		}
+		std::vector<GEO::index_t> indices(npts);
+		cdt.insert((GEO::index_t)npts, flat.data(), indices.data(), false);
+
+		// Boundary edges: 0-1, 1-2, ..., n-1-0.
+		for (size_t k = 0; k < nb; ++k) {
+			const GEO::index_t a = indices[k];
+			const GEO::index_t b = indices[(k + 1) % nb];
+			if (a != b) {
+				cdt.insert_constraint(a, b);
+			}
+		}
+		// Hole edges.
+		for (const auto &range : hole_ranges) {
+			const size_t start = range.first, end = range.second;
+			const size_t n = end - start;
+			if (n < 3) {
+				continue;
+			}
+			for (size_t k = 0; k < n; ++k) {
+				const GEO::index_t a = indices[start + k];
+				const GEO::index_t b = indices[start + (k + 1) % n];
+				if (a != b) {
+					cdt.insert_constraint(a, b);
+				}
+			}
+		}
+
+		// Remove triangles outside the boundary and inside holes.
+		cdt.remove_external_triangles(true);
+
+		const GEO::index_t nT = cdt.nT();
+		const GEO::index_t nv_total = cdt.nv();
+
+		// Remap to only vertices actually referenced by surviving triangles.
+		std::vector<int32_t> remap(nv_total, -1);
+		g_cdt2d_points.clear();
+		g_cdt2d_faces.clear();
+		for (GEO::index_t t = 0; t < nT; ++t) {
+			int32_t vids[3];
+			for (int lv = 0; lv < 3; ++lv) {
+				const GEO::index_t v = cdt.Tv(t, lv);
+				if (remap[v] == -1) {
+					remap[v] = int32_t(g_cdt2d_points.size() / 2);
+					const GEO::vec2 p = cdt.point(v);
+					g_cdt2d_points.push_back(float(p.x));
+					g_cdt2d_points.push_back(float(p.y));
+				}
+				vids[lv] = remap[v];
+			}
+			g_cdt2d_faces.push_back(vids[0]);
+			g_cdt2d_faces.push_back(vids[1]);
+			g_cdt2d_faces.push_back(vids[2]);
+		}
+		return fmt("ok points=%d faces=%d", int(g_cdt2d_points.size() / 2), int(g_cdt2d_faces.size() / 3));
+	});
+}
+
+std::vector<float> cdt2d_points() {
+	return g_cdt2d_points;
+}
+
+std::vector<int32_t> cdt2d_faces() {
+	return g_cdt2d_faces;
 }
 
 std::string mesh_build(double target_edge_length, double weld_eps) {

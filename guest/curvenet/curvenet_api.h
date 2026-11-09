@@ -97,6 +97,22 @@ std::vector<int32_t> parts_counts();
 // Replaces the kept patches with patches made elsewhere (another sandbox's parts_*).
 std::string set_parts(const std::vector<float> &vertices, const std::vector<int32_t> &triangles, const std::vector<int32_t> &counts);
 
+// Constrained Delaunay triangulation with hole removal (GEO::CDT2d: the same
+// create_enclosing_rectangle/insert/insert_constraint/remove_external_triangles(true)
+// sequence tri2d_cli.cpp proved correct), unlike boundary_patches above (plain
+// CassieTriangulator, no constraints or holes). boundary_xy is the outer
+// polygon (x,y pairs, implicitly closed); holes_xy is every hole polygon's
+// points concatenated in order, hole_counts giving each one's point count;
+// interior_xy is extra freestanding points (e.g. mesh seeds) inserted but not
+// constrained. Result is read back with cdt2d_points/cdt2d_faces.
+// "ok points=N faces=M" or "FAIL: ...".
+std::string cdt2d_triangulate(const std::vector<float> &boundary_xy, const std::vector<float> &holes_xy,
+		const std::vector<int32_t> &hole_counts, const std::vector<float> &interior_xy);
+// The last cdt2d_triangulate's output points (x,y pairs, flat).
+std::vector<float> cdt2d_points();
+// The last cdt2d_triangulate's output triangles, indices into cdt2d_points' pairs.
+std::vector<int32_t> cdt2d_faces();
+
 // --- checks (checks.cpp) ------------------------------------------------------
 // One line per check:
 //   "PASS <name> ints=a,b,c fsig=<12 hex>/<count> :: <detail>"
