@@ -248,5 +248,10 @@ int main() {
 	ADD_API_FUNCTION(check, "String", "String name", "One Gate 4 check");
 	ADD_API_FUNCTION(check_all, "String", "", "Every Gate 4 check");
 	ADD_API_FUNCTION(check_names, "String", "", "The Gate 4 check names");
+	ADD_API_FUNCTION(cdt2d_triangulate, "String",
+			"PackedFloat32Array boundary_xy, PackedFloat32Array holes_xy, PackedInt32Array hole_counts, PackedFloat32Array interior_xy",
+			"Constrained Delaunay triangulation of boundary_xy with holes_xy (hole_counts per loop) and interior_xy Steiner points");
+	ADD_API_FUNCTION(cdt2d_points, "PackedFloat32Array", "", "The last cdt2d_triangulate's output points (x,y pairs, flat)");
+	ADD_API_FUNCTION(cdt2d_faces, "PackedInt32Array", "", "The last cdt2d_triangulate's output triangles, indices into cdt2d_points' pairs");
 	halt();
 }
